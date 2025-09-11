@@ -1,12 +1,13 @@
-from flask import Flask, Response, render_template_string, abort, jsonify
 import os
 import time
 import threading
+from flask import Flask, Response, render_template, abort, jsonify
 
-app = Flask(__name__)
+
+app = Flask(__name__, template_folder="temp")
 
 AUDIO_FILE = "input.mp3"
-CHUNK_SIZE = 4096
+CHUNK_SIZE = 1024
 
 broadcast_started = False
 broadcast_finished = False
@@ -85,38 +86,7 @@ def client_generator():
 
 @app.route("/")
 def index():
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head><title>Live Audio Stream</title></head>
-    <body>
-        <h2>Live Radio</h2>
-        <p>Listeners connected: <span id="count">0</span></p>
-        <audio id="player" autoplay controls>
-            <source src="/live" type="audio/mpeg">
-        </audio>
-        <script>
-            const player = document.getElementById("player");
-            // prevent pause
-            player.addEventListener("pause", () => player.play());
-            // prevent seeking
-            player.addEventListener("seeking", () => player.currentTime = player.duration);
-
-            // update listener count every 2s
-            async function updateCount() {
-                try {
-                    const res = await fetch("/listeners");
-                    const data = await res.json();
-                    document.getElementById("count").textContent = data.count;
-                } catch {}
-            }
-            setInterval(updateCount, 2000);
-            updateCount();
-        </script>
-    </body>
-    </html>
-    """
-    return render_template_string(html)
+    return render_template("template.html")
 
 
 @app.route("/live")

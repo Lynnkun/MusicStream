@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>MP3 Live Broadcast</title>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+<body>
+  <h1>Live MP3 Broadcast</h1>
+  <audio id="player" controls autoplay></audio>
+
+  <script>
+    const socket = io();
+    const audio = document.getElementById("player");
+    const mediaSource = new MediaSource();
+    audio.src = URL.createObjectURL(mediaSource);
+
+    mediaSource.addEventListener("sourceopen", () => {
+      const sourceBuffer = mediaSource.addSourceBuffer("audio/mpeg");
+      let queue = [];
+
+      function feedQueue() {
+        if (!queue.length || sourceBuffer.updating) return;
+        sourceBuffer.appendBuffer(queue.shift());
+      }
+
+      sourceBuffer.addEventListener("updateend", feedQueue);
+
+    socket.on("audio_chunk", (chunk) => {
+    // Convert to ArrayBuffer if it's a Blob
+    if (chunk instanceof Blob) {
+        chunk.arrayBuffer().then(buf => {
+        queue.push(new Uint8Array(buf));
+        feedQueue();
+    });
+    } else if (chunk instanceof ArrayBuffer) {
+        queue.push(new Uint8Array(chunk));
+        feedQueue();
+    } else {
+        console.warn("Unknown chunk type:", chunk);
+    }
+    });
+  </script>
+</body>
+</html>
