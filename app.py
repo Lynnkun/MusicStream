@@ -1,59 +1,152 @@
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, render_template_string, abort, jsonify
 import os
 import time
+import threading
 
 app = Flask(__name__)
 
 AUDIO_FILE = "input.mp3"
-CHUNK_SIZE = 1024
+CHUNK_SIZE = 4096
 
-def audio_stream():
-    """
-    Infinite generator that yields audio chunks from file as if it were live.
-    Loops the file endlessly. No rewind.
-    """
-    while True:
-        if not os.path.exists(AUDIO_FILE):
-            time.sleep(1)
-            continue
+broadcast_started = False
+broadcast_finished = False
+listeners = set()
+lock = threading.Lock()
 
-        with open(AUDIO_FILE, "rb") as f:
+# shared state for broadcasting
+latest_chunk = None
+latest_seq = 0
+chunk_event = threading.Event()
+
+
+def producer():
+    """Reads the audio file once and pushes chunks live in real-time."""
+    global broadcast_finished, latest_chunk, latest_seq
+
+    if not os.path.exists(AUDIO_FILE):
+        broadcast_finished = True
+        return
+
+    # crude pacing assumption (~128 kbps MP3)
+    bytes_per_sec = 128_000 // 8
+
+    with open(AUDIO_FILE, "rb") as f:
+        start_time = time.time()
+        bytes_sent = 0
+
+        chunk = f.read(CHUNK_SIZE)
+        while chunk:
+            with lock:
+                latest_chunk = chunk
+                latest_seq += 1
+                chunk_event.set()
+                chunk_event.clear()
+
+            bytes_sent += len(chunk)
+
+            # throttle playback speed to feel like real-time
+            expected_time = bytes_sent / bytes_per_sec
+            elapsed = time.time() - start_time
+            if expected_time > elapsed:
+                time.sleep(expected_time - elapsed)
+
             chunk = f.read(CHUNK_SIZE)
-            while chunk:
-                yield chunk
-                chunk = f.read(CHUNK_SIZE)
-                time.sleep(0.02)  # throttle so it's "live-ish"
-        # restart when file ends (loop)
-        time.sleep(0.1)
+
+    # mark as finished
+    broadcast_finished = True
+    with lock:
+        latest_chunk = None
+        chunk_event.set()  # release all waiting clients
+
+
+def client_generator():
+    """Yields chunks in sync with the current parent timeline."""
+    global broadcast_finished, latest_seq
+
+    last_seq = latest_seq  # skip past chunks → join "live"
+
+    while True:
+        if broadcast_finished:
+            break
+
+        chunk_event.wait()
+
+        with lock:
+            if latest_chunk is None:  # EOF
+                break
+            if latest_seq == last_seq:
+                # no new data yet
+                continue
+            last_seq = latest_seq
+            chunk = latest_chunk
+
+        yield chunk
+
 
 @app.route("/")
 def index():
     html = """
     <!DOCTYPE html>
     <html>
-    <head>
-        <title>Live Audio Stream</title>
-    </head>
+    <head><title>Live Audio Stream</title></head>
     <body>
-        <h1>Live Radio</h1>
-        <audio id="player" autoplay>
+        <h2>Live Radio</h2>
+        <p>Listeners connected: <span id="count">0</span></p>
+        <audio id="player" autoplay controls>
             <source src="/live" type="audio/mpeg">
-            Your browser does not support the audio element.
         </audio>
         <script>
             const player = document.getElementById("player");
-            // Disable pause/seek
+            // prevent pause
             player.addEventListener("pause", () => player.play());
+            // prevent seeking
             player.addEventListener("seeking", () => player.currentTime = player.duration);
+
+            // update listener count every 2s
+            async function updateCount() {
+                try {
+                    const res = await fetch("/listeners");
+                    const data = await res.json();
+                    document.getElementById("count").textContent = data.count;
+                } catch {}
+            }
+            setInterval(updateCount, 2000);
+            updateCount();
         </script>
     </body>
     </html>
     """
     return render_template_string(html)
 
+
 @app.route("/live")
 def live():
-    return Response(audio_stream(), mimetype="audio/mpeg")
+    global broadcast_started, broadcast_finished
+
+    if broadcast_finished:
+        abort(404)
+
+    with lock:
+        listeners.add(threading.get_ident())
+        if not broadcast_started:
+            broadcast_started = True
+            threading.Thread(target=producer, daemon=True).start()
+
+    def stream():
+        try:
+            yield from client_generator()
+        finally:
+            with lock:
+                listeners.discard(threading.get_ident())
+
+    return Response(stream(), mimetype="audio/mpeg")
+
+
+@app.route("/listeners")
+def get_listeners():
+    with lock:
+        return jsonify({"count": len(listeners)})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, threaded=True)
